@@ -8,6 +8,19 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 import zipfile
 from io import BytesIO
 import time
+from PIL import Image
+
+# RAG Embeddings imports
+from pinecone import Pinecone, ServerlessSpec
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_pinecone import PineconeVectorStore
+from langchain.prompts import PromptTemplate
+from langchain.chains import RetrievalQA
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Fix for Windows Playwright NotImplementedError
 if sys.platform == 'win32':
@@ -112,7 +125,7 @@ with st.sidebar:
     
     # Advanced options
     st.markdown("### Advanced Options")
-    output_folder = st.text_input("Output Folder Name", value="f:\\GitHub\\Projects\\BdStall Chatbot\\Dataset\\Web scraping\\bdstall_markdown")
+    output_folder = st.text_input("Output Folder Name", value="") # required
     
     # Scraping options
     st.markdown("### Scraping Options")
@@ -277,6 +290,141 @@ def create_download_zip(output_dir):
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
 
+# RAG Embeddings Functions
+def get_markdown_text(markdown_dir):
+    """Extract text from markdown files in the specified directory."""
+    text = ""
+    if not os.path.exists(markdown_dir):
+        st.error(f"❌ Directory not found: {markdown_dir}")
+        return text
+    
+    markdown_files = [f for f in os.listdir(markdown_dir) if f.endswith('.md')]
+    if not markdown_files:
+        st.warning(f"⚠️ No markdown files found in {markdown_dir}")
+        return text
+    
+    total_files = len(markdown_files)
+    processed_files = 0
+    skipped_files = 0
+    max_file_size = 1024 * 1024  # 1MB per file limit
+    
+    for filename in markdown_files:
+        file_path = os.path.join(markdown_dir, filename)
+        try:
+            # Check file size before reading
+            file_size = os.path.getsize(file_path)
+            if file_size > max_file_size:
+                st.warning(f"⚠️ Skipping {filename} (too large: {file_size/1024/1024:.1f}MB)")
+                skipped_files += 1
+                continue
+                
+            with open(file_path, 'r', encoding='utf-8') as file:
+                content = file.read()
+                # Limit content length per file
+                if len(content) > 50000:  # 50k characters per file
+                    content = content[:50000] + "\n\n[Content truncated due to size limits]"
+                    st.info(f"📄 Truncated {filename} to 50k characters")
+                
+                text += f"\n\n--- File: {filename} ---\n\n{content}"
+                processed_files += 1
+        except Exception as e:
+            st.warning(f"⚠️ Could not read {filename}: {str(e)}")
+            skipped_files += 1
+    
+    st.info(f"📊 Processed {processed_files}/{total_files} files (skipped {skipped_files})")
+    return text
+
+def get_text_chunks(text, model_name="Google AI"):
+    """Convert the retrieved text into chunks or tokens."""
+    if model_name == 'Google AI':
+        # Reduced chunk size to handle large datasets better
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+    chunks = text_splitter.split_text(text)
+    return chunks
+
+def get_vector_store(text_chunks, model_name="Google AI", api_key=None):
+    """Store vector embeddings in Pinecone."""
+    try:
+        # API key configuration
+        pinecone_api_key = os.environ.get("PINECONE_API_KEY")
+        if not pinecone_api_key:
+            st.error("❌ PINECONE_API_KEY not found in environment variables")
+            return None
+        
+        pc = Pinecone(api_key=pinecone_api_key)
+        
+        if model_name == "Google AI":
+            google_api_key = api_key or os.environ.get("GOOGLE_API_KEY")
+            if not google_api_key:
+                st.error("❌ GOOGLE_API_KEY not found in environment variables")
+                return None
+            
+            embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/embedding-001", 
+                google_api_key=google_api_key
+            )
+        
+        # Pinecone vector store
+        # Get actual embedding dimension
+        try:
+            test_embedding = embeddings.embed_query("test")
+            embedding_dimension = len(test_embedding)
+        except Exception:
+            embedding_dimension = 768  # fallback to expected dimension
+            
+        index_name = f"bdstall-products-{embedding_dimension}"
+        
+        # Check if index exists and has correct dimensions
+        if pc.has_index(index_name):
+            index_info = pc.describe_index(index_name)
+            if index_info.dimension != embedding_dimension:
+                st.warning(f"⚠️ Existing index has dimension {index_info.dimension}, but we need {embedding_dimension}. Deleting old index...")
+                pc.delete_index(index_name)
+                
+        if not pc.has_index(index_name):
+            st.info(f"🔧 Creating new Pinecone index with {embedding_dimension} dimensions...")
+            pc.create_index(
+                name=index_name,
+                dimension=embedding_dimension,
+                metric="cosine",
+                spec=ServerlessSpec(
+                    cloud="aws",
+                    region="us-east-1"
+                )
+            )
+            st.success("✅ Pinecone index created successfully!")
+        
+        index = pc.Index(index_name)
+        vector_store = PineconeVectorStore(index=index, embedding=embeddings)
+        
+        # Add documents to Pinecone in batches to avoid size limits
+        batch_size = 50  # Process chunks in smaller batches
+        total_chunks = len(text_chunks)
+        
+        for i in range(0, total_chunks, batch_size):
+            batch = text_chunks[i:i + batch_size]
+            try:
+                vector_store.add_texts(batch)
+                st.info(f"📊 Processed batch {i//batch_size + 1}/{(total_chunks + batch_size - 1)//batch_size} ({len(batch)} chunks)")
+            except Exception as batch_error:
+                st.warning(f"⚠️ Error processing batch {i//batch_size + 1}: {str(batch_error)}")
+                # Try with even smaller batch size
+                smaller_batch_size = 10
+                for j in range(i, min(i + batch_size, total_chunks), smaller_batch_size):
+                    smaller_batch = text_chunks[j:j + smaller_batch_size]
+                    try:
+                        vector_store.add_texts(smaller_batch)
+                        st.info(f"📊 Processed smaller batch ({len(smaller_batch)} chunks)")
+                    except Exception as small_batch_error:
+                        st.error(f"❌ Failed to process small batch: {str(small_batch_error)}")
+        
+        return vector_store
+    
+    except Exception as e:
+        st.error(f"❌ Error creating vector store: {str(e)}")
+        return None
+
+
 # Main interface
 st.markdown('<h2 class="sub-header flex" >🚀 Start Scraping</h2>', unsafe_allow_html=True)
 
@@ -353,6 +501,62 @@ if 'product_links' in st.session_state and st.session_state.product_links:
         except Exception as e:
             st.markdown(f'<div class="error-box">❌ Scraping failed: {str(e)}</div>', unsafe_allow_html=True)
 
+# RAG Embeddings Section
+st.markdown("---")
+st.markdown('<h2 class="sub-header">🧠 Create RAG Embeddings</h2>', unsafe_allow_html=True)
+st.markdown('<p style="text-align: center; color: #666;">Create vector embeddings from scraped markdown data for enhanced search and retrieval</p>', unsafe_allow_html=True)
+
+# Default markdown directory
+markdown_dir = r"f:\GitHub\Projects\BdStall Chatbot\Dataset\Web scraping\bdstall_markdown"
+
+# Display current directory info
+if os.path.exists(markdown_dir):
+    markdown_files = [f for f in os.listdir(markdown_dir) if f.endswith('.md')]
+    st.info(f"📁 Found {len(markdown_files)} markdown files in: `{markdown_dir}`")
+else:
+    st.warning(f"⚠️ Directory not found: `{markdown_dir}`")
+
+# Create embeddings button
+if st.button("🚀 Create RAG Embeddings", type="primary", use_container_width=True):
+    if not os.path.exists(markdown_dir):
+        st.error(f"❌ Directory not found: {markdown_dir}")
+    else:
+        with st.spinner("Creating RAG embeddings..."):
+            try:
+                # Step 1: Extract text from markdown files
+                st.info("📖 Reading markdown files...")
+                text = get_markdown_text(markdown_dir)
+                
+                if not text.strip():
+                    st.error("❌ No text content found in markdown files")
+                else:
+                    # Step 2: Create text chunks
+                    st.info("✂️ Creating text chunks...")
+                    text_chunks = get_text_chunks(text)
+                    st.success(f"✅ Created {len(text_chunks)} text chunks")
+                    
+                    # Step 3: Create vector store
+                    st.info("🔗 Creating vector embeddings and storing in Pinecone...")
+                    vector_store = get_vector_store(text_chunks)
+                    
+                    if vector_store:
+                        st.success("✅ RAG embeddings created successfully!")
+                        st.markdown('<div class="success-box">🎉 Vector embeddings have been created and stored in Pinecone. You can now use the BdStall GPT chatbot for enhanced question answering!</div>', unsafe_allow_html=True)
+                        
+                        # Display some statistics
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("📄 Files Processed", len([f for f in os.listdir(markdown_dir) if f.endswith('.md')]))
+                        with col2:
+                            st.metric("🧩 Text Chunks", len(text_chunks))
+                        with col3:
+                            st.metric("📊 Characters", len(text))
+                    else:
+                        st.error("❌ Failed to create vector embeddings")
+                        
+            except Exception as e:
+                st.error(f"❌ Error creating embeddings: {str(e)}")
+                st.info("💡 Make sure you have set the required environment variables: PINECONE_API_KEY and GOOGLE_API_KEY")
 
 # Footer
 st.markdown("---")
