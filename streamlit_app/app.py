@@ -3,32 +3,55 @@ import requests
 from bs4 import BeautifulSoup
 import os
 import asyncio
+import sys
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 import zipfile
 from io import BytesIO
 import time
 
+# Fix for Windows Playwright NotImplementedError
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 # Page configuration
 st.set_page_config(
     page_title="BdStall Web Scraper",
     page_icon="🕷️",
-    layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # Custom CSS for better styling
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Sofia+Sans:wght@300;400;500;600;700&display=swap');
+
+/* Global font family */
+* {
+    font-family: 'Sofia Sans', sans-serif !important;
+}
+
+/* Center all content */
+.main .block-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+}
+
 .main-header {
     font-size: 2.5rem;
     color: #1f77b4;
     text-align: center;
     margin-bottom: 2rem;
+    font-weight: 600;
 }
 .sub-header {
     font-size: 1.5rem;
     color: #ff7f0e;
     margin-bottom: 1rem;
+    text-align: center;
+    font-weight: 500;
 }
 .success-box {
     padding: 1rem;
@@ -36,6 +59,7 @@ st.markdown("""
     background-color: #d4edda;
     border: 1px solid #c3e6cb;
     color: #155724;
+    text-align: center;
 }
 .error-box {
     padding: 1rem;
@@ -43,6 +67,7 @@ st.markdown("""
     background-color: #f8d7da;
     border: 1px solid #f5c6cb;
     color: #721c24;
+    text-align: center;
 }
 .info-box {
     padding: 1rem;
@@ -50,6 +75,23 @@ st.markdown("""
     background-color: #d1ecf1;
     border: 1px solid #bee5eb;
     color: #0c5460;
+    text-align: center;
+}
+
+/* Center buttons and inputs */
+.stButton > button {
+    display: block;
+    margin: 0 auto;
+}
+
+/* Center progress bars and status messages */
+.stProgress {
+    text-align: center;
+}
+
+/* Center sidebar content */
+.css-1d391kg {
+    text-align: center;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -236,83 +278,80 @@ def create_download_zip(output_dir):
     return zip_buffer.getvalue()
 
 # Main interface
-col1, col2 = st.columns([2, 1])
+st.markdown('<h2 class="sub-header flex" >🚀 Start Scraping</h2>', unsafe_allow_html=True)
 
-with col1:
-    st.markdown('<h2 class="sub-header flex justify-center">🚀 Start Scraping</h2>', unsafe_allow_html=True)
+if st.button("🔍 Get Product Links", type="primary", use_container_width=True):
+    if not base_url:
+        st.error("❌ Please enter a valid URL")
+    else:
+        with st.spinner("Fetching product links..."):
+            links = get_product_links(base_url, max_products)
+            st.session_state.product_links = links
+
+# Display found links
+if 'product_links' in st.session_state and st.session_state.product_links:
+    st.markdown(f"### 📋 Found {len(st.session_state.product_links)} Product Links")
     
-    if st.button("🔍 Get Product Links", type="primary", use_container_width=True):
-        if not base_url:
-            st.error("❌ Please enter a valid URL")
-        else:
-            with st.spinner("Fetching product links..."):
-                links = get_product_links(base_url, max_products)
-                st.session_state.product_links = links
+    # Show sample links
+    with st.expander("View Sample Links", expanded=False):
+        for i, link in enumerate(st.session_state.product_links[:5]):
+            st.text(f"{i+1}. {link}")
+        if len(st.session_state.product_links) > 5:
+            st.text(f"... and {len(st.session_state.product_links) - 5} more")
     
-    # Display found links
-    if 'product_links' in st.session_state and st.session_state.product_links:
-        st.markdown(f"### 📋 Found {len(st.session_state.product_links)} Product Links")
+    # Start scraping button
+    if st.button("🕷️ Start Scraping", type="secondary", use_container_width=True):
+        st.markdown('<div class="info-box">🚀 Starting scraping process...</div>', unsafe_allow_html=True)
         
-        # Show sample links
-        with st.expander("View Sample Links", expanded=False):
-            for i, link in enumerate(st.session_state.product_links[:5]):
-                st.text(f"{i+1}. {link}")
-            if len(st.session_state.product_links) > 5:
-                st.text(f"... and {len(st.session_state.product_links) - 5} more")
+        # Initialize progress tracking
+        st.session_state.progress_bar = st.progress(0)
+        st.session_state.status_text = st.empty()
         
-        # Start scraping button
-        if st.button("🕷️ Start Scraping", type="secondary", use_container_width=True):
-            st.markdown('<div class="info-box">🚀 Starting scraping process...</div>', unsafe_allow_html=True)
+        # Run scraping
+        try:
+            results = asyncio.run(scrape_all_products(
+                st.session_state.product_links,
+                output_folder,
+                concurrent_scraping,
+                skip_existing
+            ))
             
-            # Initialize progress tracking
-            st.session_state.progress_bar = st.progress(0)
-            st.session_state.status_text = st.empty()
+            # Display results
+            st.markdown("### 📊 Scraping Results")
             
-            # Run scraping
-            try:
-                results = asyncio.run(scrape_all_products(
-                    st.session_state.product_links,
-                    output_folder,
-                    concurrent_scraping,
-                    skip_existing
-                ))
-                
-                # Display results
-                st.markdown("### 📊 Scraping Results")
-                
-                success_count = sum(1 for r in results if "✅" in str(r))
-                error_count = sum(1 for r in results if "❌" in str(r))
-                skip_count = sum(1 for r in results if "⏭️" in str(r))
-                
-                col_s, col_e, col_sk = st.columns(3)
-                with col_s:
-                    st.metric("✅ Successful", success_count)
-                with col_e:
-                    st.metric("❌ Errors", error_count)
-                with col_sk:
-                    st.metric("⏭️ Skipped", skip_count)
-                
-                # Show detailed results
-                with st.expander("View Detailed Results", expanded=False):
-                    for result in results:
-                        st.text(result)
-                
-                # Download option
-                if success_count > 0:
-                    st.markdown("### 📥 Download Results")
-                    zip_data = create_download_zip(output_folder)
-                    st.download_button(
-                        label="📦 Download All Markdown Files (ZIP)",
-                        data=zip_data,
-                        file_name=f"bdstall_scraped_{int(time.time())}.zip",
-                        mime="application/zip",
-                        use_container_width=True
-                    )
-                
-                st.markdown('<div class="success-box">🎉 Scraping completed successfully!</div>', unsafe_allow_html=True)
-                
-            except Exception as e:
-                st.markdown(f'<div class="error-box">❌ Scraping failed: {str(e)}</div>', unsafe_allow_html=True)
+            success_count = sum(1 for r in results if "✅" in str(r))
+            error_count = sum(1 for r in results if "❌" in str(r))
+            skip_count = sum(1 for r in results if "⏭️" in str(r))
+            
+            col_s, col_e, col_sk = st.columns(3)
+            with col_s:
+                st.metric("✅ Successful", success_count)
+            with col_e:
+                st.metric("❌ Errors", error_count)
+            with col_sk:
+                st.metric("⏭️ Skipped", skip_count)
+            
+            # Show detailed results
+            with st.expander("View Detailed Results", expanded=False):
+                for result in results:
+                    st.text(result)
+            
+            # Download option
+            if success_count > 0:
+                st.markdown("### 📥 Download Results")
+                zip_data = create_download_zip(output_folder)
+                st.download_button(
+                    label="📦 Download All Markdown Files (ZIP)",
+                    data=zip_data,
+                    file_name=f"bdstall_scraped_{int(time.time())}.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
+            
+            st.markdown('<div class="success-box">🎉 Scraping completed successfully!</div>', unsafe_allow_html=True)
+            
+        except Exception as e:
+            st.markdown(f'<div class="error-box">❌ Scraping failed: {str(e)}</div>', unsafe_allow_html=True)
 
 
 # Footer
