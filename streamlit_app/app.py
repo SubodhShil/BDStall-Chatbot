@@ -26,7 +26,47 @@ load_dotenv()
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
+# Define the gradient_div function first
+def gradient_div(content, bg, page_link):
+    features_section = f"""
+        <a href="{page_link}" target="_self" style="
+            height: 70px;
+            width: 100%;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 25px;
+            display: flex;
+            text-align: center;
+            flex-direction: column;
+            color: white;
+            font-size: 18px;
+            font-weight: 600;
+            background: {bg};
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0px 8px 16px rgba(0,0,0,0.1);
+            text-decoration: none;
+            transition: all 0.3s ease;
+        ">
+            {content}
+        </a>
+        <style> 
+            a:hover {{
+                transform: translateY(-3px);
+                box-shadow: 0px 12px 24px rgba(0,0,0,0.15);
+            }}
+        </style>
+    """
+    return features_section
+
+
+
 # Page configuration
+pages = [
+    "BDStall_GPT",
+]
+
+
 st.set_page_config(
     page_title="BdStall Web Scraper",
     page_icon="🕷️",
@@ -557,6 +597,19 @@ if st.button("🚀 Create RAG Embeddings", type="primary", use_container_width=T
             except Exception as e:
                 st.error(f"❌ Error creating embeddings: {str(e)}")
                 st.info("💡 Make sure you have set the required environment variables: PINECONE_API_KEY and GOOGLE_API_KEY")
+
+
+
+st.markdown('<br><br><h2 class="sub-header">💬 Chat With BDStall Products</h2>', unsafe_allow_html=True)
+st.markdown(
+    gradient_div(
+        "BDStall GPT",
+        "linear-gradient(to right, #4776E6, #8E54E9)",
+        "/BDStall_GPT"
+    ),
+    unsafe_allow_html=True
+)
+
 
 # Footer
 st.markdown("---")
