@@ -382,6 +382,8 @@ def get_text_chunks(text, model_name="Google AI"):
     chunks = text_splitter.split_text(text)
     return chunks
 
+
+# !IMPORTANT!
 def get_vector_store(text_chunks, model_name="Google AI", api_key=None):
     """Store vector embeddings in Pinecone."""
     try:
